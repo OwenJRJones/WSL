@@ -407,7 +407,8 @@ void MirroredNetworking::AddNetworkEndpoint(const GUID& NetworkId) noexcept
         auto network = wsl::core::networking::OpenNetwork(NetworkId);
         WSL_LOG("MirroredNetworking::AddNetworkEndpoint [HcnOpenNetwork]", TraceLoggingValue(NetworkId, "networkId"));
 
-        // Query the network properties for diagnostic purposes only.
+        // Query the network properties for loopback network detection and diagnostic purposes.
+        // The properties.IsLoopback flag is used to determine whether to apply firewall policies.
         wsl::shared::hns::HNSNetwork properties;
         wil::unique_cotaskmem_string networkProperties;
         executionStep = "HcnQueryNetworkProperties";
@@ -440,7 +441,27 @@ void MirroredNetworking::AddNetworkEndpoint(const GUID& NetworkId) noexcept
         endpointInfo.NetworkId = NetworkId;
         endpointInfo.EndpointId = endpointId;
 
-        if (m_config.FirewallConfig.Enabled())
+        // Loopback networks don't support firewall policies - creating an endpoint with firewall
+        // policies on a loopback network will fail with HCN error 0x803B001B (\"Invalid JSON document
+        // string\"). This behavior changed in KB5074109. Additionally, loopback networks require
+        // HostComputeNetwork instead of VirtualNetwork in the endpoint settings.
+        // See: https://github.com/microsoft/WSL/issues/14080
+        const bool isLoopbackNetwork = properties.IsLoopback;
+
+        if (isLoopbackNetwork)
+        {
+            WSL_LOG(
+                "MirroredNetworking::AddNetworkEndpoint [Loopback network - using simplified endpoint settings]",
+                TraceLoggingValue(NetworkId, "networkId"));
+
+            // Loopback networks require HostComputeNetwork (not VirtualNetwork) and don't support policies
+            hns::HostComputeEndpoint hnsEndpoint{};
+            hnsEndpoint.HostComputeNetwork = NetworkId;
+            hnsEndpoint.SchemaVersion.Major = 2;
+            hnsEndpoint.SchemaVersion.Minor = 16;
+            endpointSettings = ToJsonW(hnsEndpoint);
+        }
+        else if (m_config.FirewallConfig.Enabled())
         {
             // Create HNS firewall policy object for the endpoint
             hns::HostComputeEndpoint hnsEndpoint{};
